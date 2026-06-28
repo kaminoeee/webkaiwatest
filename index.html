@@ -3,20 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P2Pビデオ会話テスト</title>
+    <title>試験的 P2P ルーム通話</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 </head>
 <body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
 
     <div class="bg-white p-6 rounded-2xl shadow-xl w-full max-w-5xl text-center">
-        <h1 class="text-2xl font-bold mb-6 text-gray-800">🌐 P2P ルーム通話</h1>
+        <h1 class="text-2xl font-bold mb-6 text-gray-800">🌐 P2P ルーム通話 (安定版)</h1>
 
-        <div id="setup-area" class="mb-6 p-4 bg-gray-50 rounded-xl flex flex-col md:flex-row items-center justify-center gap-4">
-            <input id="room-id-input" type="text" placeholder="部屋番号（例: room123）" class="border border-gray-300 rounded-lg px-4 py-2 w-full md:w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold">
-            <button id="join-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-2 rounded-lg transition w-full md:w-auto">部屋に入る</button>
+        <div id="setup-area" class="mb-6 p-4 bg-gray-50 rounded-xl flex flex-col items-center justify-center gap-4">
+            <div class="flex flex-col md:flex-row gap-4 w-full justify-center">
+                <input id="room-id-input" type="text" placeholder="部屋番号（例: room123）" class="border border-gray-300 rounded-lg px-4 py-2 w-full md:w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 text-center font-bold">
+                <button id="join-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-2 rounded-lg transition w-full md:w-auto">部屋を作成/入室</button>
+            </div>
         </div>
 
-        <p id="status-text" class="text-sm text-gray-500 mb-4 hidden">部屋: <span id="current-room-id" class="font-bold text-blue-600"></span> に参加中</p>
+        <div id="status-area" class="mb-6 p-4 bg-blue-50 rounded-xl border border-blue-200 hidden text-center">
+            <p class="text-sm text-gray-600 mb-2">部屋: <span id="current-room-id" class="font-bold text-blue-600"></span> に参加中</p>
+            <p class="text-xs text-gray-500 mb-1">相手にこのURLを共有してください：</p>
+            <input id="share-url" type="text" readonly class="bg-white border border-gray-300 rounded text-center px-2 py-1 text-xs w-full max-w-md font-mono select-all">
+        </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div class="flex items-center gap-4 bg-gray-50 p-3 rounded-xl border border-gray-200">
@@ -30,7 +36,7 @@
             </div>
 
             <div class="flex items-center bg-gray-50 p-3 rounded-xl border border-gray-200">
-                <div class="relative bg-black rounded-xl overflow-hidden aspect-video shadow-inner flex-1Url">
+                <div class="relative bg-black rounded-xl overflow-hidden aspect-video shadow-inner flex-1">
                     <video id="remote-video" autoplay playsinline class="w-full h-full object-cover"></video>
                     <span class="absolute bottom-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded">相手</span>
                 </div>
@@ -47,9 +53,10 @@
     <script>
         const roomIdInput = document.getElementById('room-id-input');
         const joinBtn = document.getElementById('join-btn');
-        const statusText = document.getElementById('status-text');
-        const currentRoomIdEl = document.getElementById('current-room-id');
         const setupArea = document.getElementById('setup-area');
+        const statusArea = document.getElementById('status-area');
+        const currentRoomIdEl = document.getElementById('current-room-id');
+        const shareUrlInput = document.getElementById('share-url');
         
         const localVideo = document.getElementById('local-video');
         const remoteVideo = document.getElementById('remote-video');
@@ -60,106 +67,82 @@
 
         let localStream = null;
         let peer = null;
-        let currentCall = null;
-        
         let videoEnabled = true;
         let audioEnabled = true;
 
-        // 1. 最初からカメラとマイクの許可を取得＆音量メーターの開始
+        // 1. 最初からカメラとマイクの許可を取得＆音量メーター開始
         navigator.mediaDevices.getUserMedia({ video: true, audio: true })
             .then(stream => {
                 localStream = stream;
                 localVideo.srcObject = stream;
                 startVolumeMeter(stream);
+
+                // URLにすでに部屋番号（?room=xxx）が含まれていれば、自動入室する（スマホ対策）
+                const urlParams = new URLSearchParams(window.location.search);
+                const roomParam = urlParams.get('room');
+                if (roomParam) {
+                    roomIdInput.value = roomParam;
+                    // スマホのタップ制限回避のため、少しだけ遅らせて自動実行
+                    setTimeout(() => startSession(roomParam), 500);
+                }
             })
             .catch(err => {
-                alert('カメラまたはマイクの許可が必要です。');
+                alert('カメラ・マイクの許可が必要です。ブラウザの設定を確認してください。');
                 console.error(err);
             });
 
-        // 2. 「部屋に入る」ボタンを押したときの処理
+        // ボタンクリックでの入室
         joinBtn.addEventListener('click', () => {
             const roomId = roomIdInput.value.trim();
-            if (!roomId) {
-                alert('部屋番号を入力してください。');
-                return;
-            }
-
-            // PeerJSの初期化（部屋名を自分のPeerIDとして設定する）
-            // ※同じ部屋名で最初に入った人が「ホスト(親)」、2人目が「ゲスト(子)」になります
-            peer = new Peer(roomId + "_user_" + Math.floor(Math.random() * 1000));
-
-            peer.on('open', (myId) => {
-                setupArea.classList.add('hidden');
-                statusText.classList.remove('hidden');
-                currentRoomIdEl.textContent = roomId;
-
-                // 2人目として入室を試みるため、まず相手（先に入っている人）に自動発信してみる
-                // 先行者がいない（自分が1人目）の場合はエラーになりますが問題ありません
-                tryConnectToExistingPeer(roomId);
-            });
-
-            // 自分が1人目の時、後から入ってきた人（2人目）からの着信を受ける処理
-            peer.on('call', (call) => {
-                currentCall = call;
-                call.answer(localStream);
-                call.on('stream', (remoteStream) => {
-                    remoteVideo.srcObject = remoteStream;
-                });
-            });
+            if (!roomId) return alert('部屋番号を入力してください。');
+            startSession(roomId);
         });
 
-        // 先行者がいるか確認して接続する関数
-        function tryConnectToExistingPeer(roomId) {
-            // 簡易的にシグナルを送るため、同じ部屋名プレフィックスを持つ相手に接続を試みます
-            // ※この簡易コードでは1対1の通話を想定しています
-            peer.on('error', (err) => {
-                console.log("接続待機中...", err);
-            });
-
-            // 相手を探索する代わりに、自動的にシグナリング。
-            // 実際はもう一方の端末が自動で発信するか、着信を待つ形になります。
-            // 今回は相互にコールし合えるよう、相手のIDを推測して発信します。
-            // 接続を安定させるため、少し特殊な部屋番号の紐付けをしています。
-            
-            // 簡易ルーム機能の実装：相手が先にいたら発信する
-            // ※今回は1対1を簡単に行うため、相手の着信を待つか、手動で見つける仕組みをPeerJSの仕様に合わせて最適化しています。
-            // 今回は「同じ部屋名」を入力した者同士を繋ぐため、PeerJSの既存の接続（Call）を利用します。
-            
-            // 自分が2人目の場合、相手に発信する
-            // PeerJSの仕様上、部屋番号をベースにしたIDで相互通信させます。
-            // 部屋に入ったら、定期的に相手がいないかチェックするか、相手からの着信を待ちます。
-        }
-
-        // --- ルーム仕様の調整 ---
-        // 部屋名で確実に繋ぐため、PeerJSの「MeshRoom」に近い挙動を1対1で再現します。
-        joinBtn.onclick = () => {
-            const roomName = roomIdInput.value.trim();
-            if(!roomName) return;
-
-            // 部屋名そのものをIDにすると重複するので、裏側で「部屋名A」「部屋名B」の2つの枠を作ります。
-            // 先に入った人がA、次がBになります（簡易判定）
+        // 2. 通話セッションの開始（ここが安定化の肝）
+        function startSession(roomId) {
             setupArea.classList.add('hidden');
-            statusText.classList.remove('hidden');
-            currentRoomIdEl.textContent = roomName;
+            statusArea.classList.remove('hidden');
+            currentRoomIdEl.textContent = roomId;
 
-            // ランダムにAかBで入ってみる（簡易的な部屋マッチング）
-            // 本格的なものはサーバーが必要ですが、静的サイトで動くよう工夫しています
-            const isPlayer1 = confirm("あなたがこの部屋の最初の入室者（ホスト）ですか？\n「はい」→ 待機します\n「いいえ」→ ホストに発信します");
-            
-            if(isPlayer1) {
-                peer = new Peer(roomName + "-host");
+            // 招待用URLを生成して表示
+            const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+            shareUrlInput.value = shareUrl;
+
+            // URLのパラメータから自分がホスト（1人目）かゲスト（2人目）かを自動判定
+            // 最初にURLを踏んだPCが「ホスト」、そのURLを貰って開いたスマホが「ゲスト」になります
+            const urlParams = new URLSearchParams(window.location.search);
+            const isGuest = urlParams.has('room');
+
+            if (!isGuest) {
+                // 【PC / ホスト側】待ち受け用の固定IDを作成
+                peer = new Peer(roomId + "-host");
+
+                // ゲストからの着信を待つ
                 peer.on('call', (call) => {
                     call.answer(localStream);
-                    call.on('stream', (remoteStream) => { remoteVideo.srcObject = remoteStream; });
+                    call.on('stream', (remoteStream) => {
+                        remoteVideo.srcObject = remoteStream;
+                    });
+                });
+
+                peer.on('error', (err) => {
+                    if (err.type === 'unavailable-id') {
+                        alert('この部屋番号はすでに使われています。別の番号にしてください。');
+                        location.reload();
+                    }
                 });
             } else {
-                peer = new Peer(roomName + "-guest");
-                const call = peer.call(roomName + "-host", localStream);
-                call.on('stream', (remoteStream) => { remoteVideo.srcObject = remoteStream; });
+                // 【スマホ / ゲスト側】ランダムなIDで起動し、ホストに発信する
+                peer = new Peer();
+                peer.on('open', () => {
+                    // ホスト（PC側）に向かって発信
+                    const call = peer.call(roomId + "-host", localStream);
+                    call.on('stream', (remoteStream) => {
+                        remoteVideo.srcObject = remoteStream;
+                    });
+                });
             }
-        };
-
+        }
 
         // 3. カメラのON/OFF切り替え
         toggleVideoBtn.addEventListener('click', () => {
@@ -171,7 +154,7 @@
             }
         });
 
-        // 4. マイクのON/OFF（ミュート）切り替え
+        // 4. マイクのON/OFF切り替え
         toggleAudioBtn.addEventListener('click', () => {
             if (localStream) {
                 audioEnabled = !audioEnabled;
@@ -181,7 +164,7 @@
             }
         });
 
-        // 5. 音量メーター（オーディオビジュアライザ）のロジック
+        // 5. 音量メーター（オーディオビジュアライザ）
         function startVolumeMeter(stream) {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const analyser = audioContext.createAnalyser();
@@ -194,21 +177,12 @@
 
             function updateMeter() {
                 analyser.getByteFrequencyData(dataArray);
-                
-                // 音量の平均値を計算
                 let total = 0;
-                for (let i = 0; i < bufferLength; i++) {
-                    total += dataArray[i];
-                }
+                for (let i = 0; i < bufferLength; i++) { total += dataArray[i]; }
                 const average = total / bufferLength;
-                
-                // 音量をパーセンテージに変換（最大値を適度に調整）
                 const volumePercent = Math.min(100, Math.floor((average / 128) * 100));
                 
-                // バーの高さを更新
                 volumeBar.style.height = volumePercent + "%";
-                
-                // 緑から赤へ色を変える演出（オプション）
                 if(volumePercent > 70) {
                     volumeBar.className = "w-full bg-red-500 rounded-full transition-all duration-75";
                 } else if(volumePercent > 40) {
@@ -216,7 +190,6 @@
                 } else {
                     volumeBar.className = "w-full bg-green-500 rounded-full transition-all duration-75";
                 }
-
                 requestAnimationFrame(updateMeter);
             }
             updateMeter();
